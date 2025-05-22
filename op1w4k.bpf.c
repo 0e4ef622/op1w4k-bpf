@@ -190,7 +190,7 @@ int BPF_PROG(op1w4k_kbd_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         return 0;
     }
 
-    bool pressed = report[6] == 0x37;
+    bool pressed = report[1] & 2;
 
     if (pressed && hold_state == RELEASED) {
         hold_state = START_HOLD;
@@ -223,8 +223,6 @@ int BPF_PROG(op1w4k_kbd_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         hold_state = RELEASED;
     }
 
-    if (pressed)
-        return -1;
     return 0;
 }
 
@@ -246,18 +244,22 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         bpf_printk("bpf_map_lookup_elem failed");
         return 0;
     }
+
+    bool special = hold_state != RELEASED;
+    bool any_button_pressed = report[1];
+    if (special && any_button_pressed)
+        hold_state = HOLD_TIMEOUT;
+
     if (report[6] == 0x01) {
         /* Scroll up */
-        if (hold_state != RELEASED) {
-            hold_state = HOLD_TIMEOUT;
+        if (special) {
             vol_dir = VOL_UP;
             bpf_wq_start(&hold_elem->vol_wq, 0);
             return -1;
         }
     } else if (report[6] == 0xff) {
         /* Scroll down */
-        if (hold_state != RELEASED) {
-            hold_state = HOLD_TIMEOUT;
+        if (special) {
             vol_dir = VOL_DOWN;
             bpf_wq_start(&hold_elem->vol_wq, 0);
             return -1;
