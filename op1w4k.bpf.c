@@ -6,11 +6,11 @@
 char _license[] SEC("license") = "GPL v2";
 
 /* Identifier for system-wide realtime clock.  */
-#define CLOCK_REALTIME			0
+#define CLOCK_REALTIME		0
 /* Monotonic system-wide clock.  */
 #define CLOCK_MONOTONIC		1
 /* Monotonic system-wide clock that includes time spent in suspension.  */
-#define CLOCK_BOOTTIME			7
+#define CLOCK_BOOTTIME		7
 
 #define HID_KEYCODE_DOT 55
 #define HID_KEYCODE_DASH 45
@@ -21,6 +21,7 @@ char _license[] SEC("license") = "GPL v2";
 const volatile int kbd_hid_id = 0;
 enum {
     RELEASED,
+    VOL,
     START_HOLD,
     HOLD_TIMEOUT,
 } hold_state;
@@ -254,6 +255,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         /* Scroll up */
         if (special) {
             vol_dir = VOL_UP;
+            hold_state = VOL;
             bpf_wq_start(&hold_elem->vol_wq, 0);
             return -1;
         }
@@ -261,6 +263,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         /* Scroll down */
         if (special) {
             vol_dir = VOL_DOWN;
+            hold_state = VOL;
             bpf_wq_start(&hold_elem->vol_wq, 0);
             return -1;
         }

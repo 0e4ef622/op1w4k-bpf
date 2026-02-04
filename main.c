@@ -1,6 +1,5 @@
 #include <fcntl.h>
 #include <dirent.h>
-#include <signal.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -206,11 +205,6 @@ enum device_match_result device_matches(const char* sysfs_path) {
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
     return vfprintf(stderr, format, args);
-}
-
-volatile char signaled = 0;
-void signal_handler(int sig) {
-    signaled = 1;
 }
 
 int attach_bpf(int mouse_hid_id, int hid_id);
