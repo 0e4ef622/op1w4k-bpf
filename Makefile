@@ -18,6 +18,9 @@ op1w4k.skel.h: op1w4k.bpf.o
 op1w4k-bpf: main.c op1w4k.skel.h
 	clang main.c -lbpf -o op1w4k-bpf
 
+monitor: monitor.c op1w4k.skel.h vec.h rdesc.h
+	clang -Wall $(shell pkg-config --cflags --libs libbpf libsystemd) -fdefer-ts monitor.c -o monitor
+
 .PHONY: clean
 
 clean:
