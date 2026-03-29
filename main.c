@@ -1,282 +1,89 @@
-#include <fcntl.h>
-#include <dirent.h>
-#include <limits.h>
+#define _GNU_SOURCE
+#include "op1w4k.skel.h"
+#include <bits/time.h>
 #include <stdbool.h>
+#include <stddefer.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stddef.h>
-#include <unistd.h>
-#include <bpf/libbpf.h>
-#include "op1w4k.skel.h"
+#include <systemd/sd-device.h>
+#include <systemd/sd-event.h>
 
-char MOUSE_RDESC[] = {
-    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x02,        // Usage (Mouse)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x01,        //   Report ID (1)
-    0x09, 0x01,        //   Usage (Pointer)
-    0xA1, 0x00,        //   Collection (Physical)
-    0x05, 0x09,        //     Usage Page (Button)
-    0x19, 0x01,        //     Usage Minimum (0x01)
-    0x29, 0x08,        //     Usage Maximum (0x08)
-    0x15, 0x00,        //     Logical Minimum (0)
-    0x25, 0x01,        //     Logical Maximum (1)
-    0x95, 0x08,        //     Report Count (8)
-    0x75, 0x01,        //     Report Size (1)
-    0x81, 0x02,        //     Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x05, 0x01,        //     Usage Page (Generic Desktop Ctrls)
-    0x09, 0x30,        //     Usage (X)
-    0x09, 0x31,        //     Usage (Y)
-    0x16, 0x00, 0x80,  //     Logical Minimum (-32768)
-    0x26, 0xFF, 0x7F,  //     Logical Maximum (32767)
-    0x75, 0x10,        //     Report Size (16)
-    0x95, 0x02,        //     Report Count (2)
-    0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
-    0x09, 0x38,        //     Usage (Wheel)
-    0x15, 0x81,        //     Logical Minimum (-127)
-    0x25, 0x7F,        //     Logical Maximum (127)
-    0x95, 0x01,        //     Report Count (1)
-    0x75, 0x08,        //     Report Size (8)
-    0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
-    0x05, 0x0C,        //     Usage Page (Consumer)
-    0x0A, 0x38, 0x02,  //     Usage (AC Pan)
-    0x95, 0x01,        //     Report Count (1)
-    0x81, 0x06,        //     Input (Data,Var,Rel,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,              //   End Collection
-    0xC0,              // End Collection
+#include "rdesc.h"
+#include "vec.h"
+
+const char *vid_pids[][2] = {
+    {"3367", "1970"}, /* Wireless */
+    {"3367", "1972"}, /* Wired */
 };
 
-char KBD_RDESC[] = {
-    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x06,        // Usage (Keyboard)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x02,        //   Report ID (2)
-    0x05, 0x07,        //   Usage Page (Kbrd/Keypad)
-    0x19, 0xE0,        //   Usage Minimum (0xE0)
-    0x29, 0xE7,        //   Usage Maximum (0xE7)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x75, 0x01,        //   Report Size (1)
-    0x95, 0x08,        //   Report Count (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x95, 0x01,        //   Report Count (1)
-    0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Const,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x95, 0x05,        //   Report Count (5)
-    0x75, 0x08,        //   Report Size (8)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x65,        //   Logical Maximum (101)
-    0x05, 0x07,        //   Usage Page (Kbrd/Keypad)
-    0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0x65,        //   Usage Maximum (0x65)
-    0x81, 0x00,        //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,              // End Collection
-    0x06, 0x01, 0xFF,  // Usage Page (Vendor Defined 0xFF01)
-    0x09, 0x02,        // Usage (0x02)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0xA1,        //   Report ID (-95)
-    0x75, 0x08,        //   Report Size (8)
-    0x95, 0x3F,        //   Report Count (63)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x09, 0x21,        //   Usage (0x21)
-    0xB1, 0x03,        //   Feature (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x85, 0xA0,        //   Report ID (-96)
-    0x75, 0x80,        //   Report Size (-128)
-    0x95, 0x41,        //   Report Count (65)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x09, 0x22,        //   Usage (0x22)
-    0xB1, 0x03,        //   Feature (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0xC0,              // End Collection
-    0x05, 0x0C,        // Usage Page (Consumer)
-    0x09, 0x01,        // Usage (Consumer Control)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x06,        //   Report ID (6)
-    0x19, 0x01,        //   Usage Minimum (Consumer Control)
-    0x2A, 0x3C, 0x02,  //   Usage Maximum (AC Format)
-    0x15, 0x01,        //   Logical Minimum (1)
-    0x26, 0x3C, 0x02,  //   Logical Maximum (572)
-    0x95, 0x01,        //   Report Count (1)
-    0x75, 0x10,        //   Report Size (16)
-    0x81, 0x00,        //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,              // End Collection
-    0x06, 0x02, 0xFF,  // Usage Page (Vendor Defined 0xFF02)
-    0x09, 0x01,        // Usage (0x01)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x03,        //   Report ID (3)
-    0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0xFF,        //   Usage Maximum (0xFF)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x00,        //   Logical Maximum (0)
-    0x95, 0x07,        //   Report Count (7)
-    0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Const,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,              // End Collection
-    0x06, 0x02, 0xFF,  // Usage Page (Vendor Defined 0xFF02)
-    0x09, 0x02,        // Usage (0x02)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x08,        //   Report ID (8)
-    0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0xFF,        //   Usage Maximum (0xFF)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x00,        //   Logical Maximum (0)
-    0x95, 0x3F,        //   Report Count (63)
-    0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Const,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,              // End Collection
+typedef enum {
+    MOUSE,
+    KEYBOARD,
+} interface_type;
 
-    // 156 bytes
-};
+typedef struct {
+    struct op1w4k_bpf *bpf_skel;
+    int busnum;
+    int devnum;
+    int mouse_id;
+    int keyboard_id;
+    bool matched;
+} device_info;
 
-enum device_match_result {
-    NOT_MATCHED,
-    MATCHED_KEYBOARD,
-    MATCHED_MOUSE,
-    ALREADY_FIXED,
-};
-
-const char vid_pids[][10] = {
-    "3367:1970", /* Wireless */
-    "3367:1972", /* Wired */
-};
-const int vid_pids_len = sizeof(vid_pids) / sizeof(vid_pids[0]);
-
-/*
- * Given a path like "/sys/bus/hid/devices/0003:3367:1970.0049", check the vid/pid and report
- * descriptor
- */
-enum device_match_result device_matches(const char* sysfs_path) {
-
-    /* Check path */
-    if (strlen(sysfs_path) != 40) {
-        return NOT_MATCHED;
-    }
-
-    const char prefix[] = "/sys/bus/hid/devices/";
-    if (strncmp(prefix, sysfs_path, sizeof(prefix) - 1) != 0) {
-        return NOT_MATCHED;
-    }
-
-    bool found = false;
-    for (int i = 0; i < vid_pids_len; i++) {
-        if (strncmp(vid_pids[i], sysfs_path + 26, sizeof(vid_pids[i]) - 1) == 0) {
-            found = true;
-            break;
-        }
-    }
-
-    char pathbuf[40 + 18 + 1];
-    snprintf(pathbuf, sizeof(pathbuf), "%s/report_descriptor", sysfs_path);
-
-    /* Check report descriptor */
-    int fd = open(pathbuf, O_RDONLY);
-    if (fd == -1) {
-        fprintf(stderr, "Failed to open %s: %s\n", pathbuf, strerror(errno));
-        return NOT_MATCHED;
-    }
-
-    char reportbuf[sizeof(KBD_RDESC) + 1];
-    int bytes_read = read(fd, &reportbuf, sizeof(reportbuf));
-    close(fd);
-    if (bytes_read == -1) {
-        fprintf(stderr, "Failed to read %s: %s\n", pathbuf, strerror(errno));
-        return NOT_MATCHED;
-    }
-    if (bytes_read == sizeof(KBD_RDESC)) {
-        if (memcmp(reportbuf, KBD_RDESC, bytes_read) == 0) {
-            return MATCHED_KEYBOARD;
-        } else {
-            if (reportbuf[35] == 1) {
-                reportbuf[35] = 0;
-                if (memcmp(reportbuf, KBD_RDESC, bytes_read) == 0)
-                    return ALREADY_FIXED;
-            }
-        }
-    } else if (bytes_read == sizeof(MOUSE_RDESC)) {
-        if (memcmp(reportbuf, MOUSE_RDESC, bytes_read) == 0) {
-            return MATCHED_MOUSE;
-        }
-    }
-
-    return NOT_MATCHED;
+static device_info device_info_new(int busnum, int devnum) {
+    return (device_info){
+        .bpf_skel = NULL,
+        .busnum = busnum,
+        .devnum = devnum,
+        .mouse_id = -1,
+        .keyboard_id = -1,
+        .matched = false,
+    };
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
-{
-    return vfprintf(stderr, format, args);
+static void device_info_free(device_info *d) {
+    op1w4k_bpf__destroy(d->bpf_skel);
 }
 
-int attach_bpf(int mouse_hid_id, int hid_id);
-int main(int argc, char *argv[]) {
-    char *dirpath = "/sys/bus/hid/devices/";
-    DIR *d = opendir(dirpath);
-    struct dirent *ent = NULL;
-    errno = 0;
-    int kbd_hid_id = -1;
-    int mouse_hid_id = -1;
-    while ((errno = 0, ent = readdir(d)) != NULL) {
-        if (errno != 0) {
-            fprintf(stderr, "Failed to read directory %s: %s\n", dirpath, strerror(errno));
-            continue;
-        }
-        if (ent->d_name[0] == '.') {
-            continue;
-        }
+vec_define(device_info);
+typedef struct {
+    vec_device_info devices;
+} devices_list;
 
-        char devbuf[41];
-        snprintf(devbuf, sizeof(devbuf), "%s%s", dirpath, ent->d_name);
-        enum device_match_result r = device_matches(devbuf);
-        if (r == ALREADY_FIXED) {
-            fprintf(stderr, "%s matches but the report descriptor is already fixed!\n", devbuf);
-            return 1;
-        }
-        if (r == NOT_MATCHED) {
-            continue;
-        }
+static devices_list devices_list_new() {
+    return (devices_list){
+        .devices = vec_new(),
+    };
+}
+static void devices_list_free(devices_list list) {
+    for (int i = 0; i < list.devices.length; ++i) {
+        device_info_free(&list.devices.data[i]);
+    }
+    vec_free(&list.devices);
+}
 
-        int hid_id = strtol(devbuf + 36, NULL, 16);
-        if (r == MATCHED_KEYBOARD) {
-            fprintf(stderr, "%s matches keyboard\n", devbuf);
-            if (kbd_hid_id == -1) {
-                kbd_hid_id = hid_id;
-            } else {
-                fprintf(stderr, "Multiple matching devices found! (todo)\n");
-                return 2;
-            }
-        } else if (r == MATCHED_MOUSE) {
-            fprintf(stderr, "%s matches mouse\n", devbuf);
-            if (mouse_hid_id == -1) {
-                mouse_hid_id = hid_id;
-            } else {
-                fprintf(stderr, "Multiple matching devices found! (todo)\n");
-                return 2;
-            }
+static device_info *find_device_info_for_busdev(
+    devices_list *list, int busnum, int devnum) {
+    for (int i = 0; i < list->devices.length; ++i) {
+        device_info *x = &list->devices.data[i];
+        if (x->busnum == busnum && x->devnum == devnum) {
+            return x;
         }
     }
+    return NULL;
+}
 
-    if (kbd_hid_id == -1) {
-        fprintf(stderr, "Failed to find keyboard HID ID\n");
-    }
-    if (mouse_hid_id == -1) {
-        fprintf(stderr, "Failed to find mouse HID ID\n");
-    }
-    if (mouse_hid_id == -1 || kbd_hid_id == -1) {
-        return 1;
-    }
-
-    int r = attach_bpf(mouse_hid_id, kbd_hid_id);
-    if (r == 0) {
-        for (;;) {
-            sleep(UINT_MAX);
-        }
-    } else {
+static device_info *get_or_create_device_info_for_busdev(
+    devices_list *list, int busnum, int devnum) {
+    device_info *r = find_device_info_for_busdev(list, busnum, devnum);
+    if (r != NULL)
         return r;
-    }
-    return 0;
+    vec_push(&list->devices, device_info_new(busnum, devnum));
+    return &list->devices.data[list->devices.length - 1];
 }
 
-int attach_bpf(int mouse_hid_id, int kbd_hid_id) {
+static struct op1w4k_bpf *attach_bpf(int mouse_hid_id, int kbd_hid_id) {
     struct op1w4k_bpf *skel;
     int err = 0;
 
@@ -287,8 +94,9 @@ int attach_bpf(int mouse_hid_id, int kbd_hid_id) {
     skel = op1w4k_bpf__open();
     if (!skel) {
         fprintf(stderr, "Failed to open BPF skeleton\n");
-        return 1;
+        return NULL;
     }
+    defer op1w4k_bpf__destroy(skel);
 
     skel->struct_ops.op1w4k_kbd->hid_id = kbd_hid_id;
     skel->struct_ops.op1w4k_mouse->hid_id = mouse_hid_id;
@@ -298,21 +106,224 @@ int attach_bpf(int mouse_hid_id, int kbd_hid_id) {
     err = op1w4k_bpf__load(skel);
     if (err) {
         fprintf(stderr, "Failed to load and verify BPF skeleton\n");
-        goto cleanup;
+        return NULL;
     }
 
     /* Attach tracepoint handler */
     err = op1w4k_bpf__attach(skel);
     if (err) {
         fprintf(stderr, "Failed to attach BPF skeleton\n");
-        goto cleanup;
+        return NULL;
     }
 
     printf("Successfully started!\n");
-    return 0;
+    struct op1w4k_bpf *r = skel;
+    skel = NULL;
+    return r;
+}
 
-cleanup:
-    printf("Cleaning up\n");
-    op1w4k_bpf__destroy(skel);
-    return -err;
+#define CHECK(s, a)                                                            \
+    if (r < 0) {                                                               \
+        fprintf(stderr, s "\n", (a));                                          \
+        return;                                                                \
+    }
+
+static void handle_device_bind(sd_device *dev, devices_list *dlist) {
+    int r = 0;
+
+    // Check subsystem
+    {
+        const char *subsystem = NULL;
+        r = sd_device_get_subsystem(dev, &subsystem);
+        CHECK("Failed to get subsystem (%s)", strerrorname_np(-r));
+        if (strcmp(subsystem, "hid") != 0)
+            return;
+    }
+
+    // Get usb_device parent
+    sd_device *parent = NULL;
+    r = sd_device_get_parent_with_subsystem_devtype(
+        dev, "usb", "usb_device", &parent);
+    if (r == -ENOENT)
+        return;
+    CHECK("Failed to get parent device (%s)", strerrorname_np(-r));
+
+    // Check vendor ID and product ID
+    {
+        const char *vid = NULL, *pid = NULL;
+        size_t n = 0;
+        r = sd_device_get_sysattr_value_with_size(parent, "idVendor", &vid, &n);
+        CHECK("Failed to get vendor ID (%s)", strerrorname_np(-r));
+        if (n < 4)
+            fprintf(stderr, "Vendor ID shorter than expected (%zu < 4)\n", n);
+        r = sd_device_get_sysattr_value_with_size(
+            parent, "idProduct", &pid, &n);
+        CHECK("Failed to get product ID (%s)", strerrorname_np(-r));
+        if (n < 4)
+            fprintf(stderr, "Product ID shorter than expected (%zu < 4)\n", n);
+
+        bool found = false;
+        for (int i = 0; i < sizeof(vid_pids) / sizeof(*vid_pids); ++i) {
+            if (strncmp(vid_pids[i][0], vid, 4) == 0 &&
+                strncmp(vid_pids[i][1], pid, 4) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return;
+    }
+
+    // Check report descriptors
+    interface_type iftype;
+    {
+        const char *rdesc = NULL;
+        size_t n = 0;
+        r = sd_device_get_sysattr_value_with_size(
+            dev, "report_descriptor", &rdesc, &n);
+        CHECK("Failed to get report descriptor (%s)", strerrorname_np(-r));
+        if (n == sizeof(MOUSE_RDESC) && memcmp(rdesc, MOUSE_RDESC, n) == 0) {
+            iftype = MOUSE;
+        } else if (n == sizeof(KBD_RDESC) && memcmp(rdesc, KBD_RDESC, n) == 0) {
+            iftype = KEYBOARD;
+        } else {
+            return;
+        }
+    }
+
+    // Get HID ID
+    int hid_id;
+    {
+        const char *device_id = NULL;
+        r = sd_device_get_device_id(dev, &device_id);
+        CHECK("Failed to get device_id (%s)", strerrorname_np(-r));
+        r = sscanf(
+            device_id, "+hid:%x:%x:%x.%x", &hid_id, &hid_id, &hid_id, &hid_id);
+        if (r != 4) {
+            fprintf(stderr, "Failed to parse device_id=%s\n", device_id);
+        }
+    }
+
+    // Get busnum and devnum
+    const char *busnum_str = NULL, *devnum_str = NULL;
+    r = sd_device_get_sysattr_value(parent, "busnum", &busnum_str);
+    CHECK("Failed to get busnum (%s)", strerrorname_np(-r));
+    r = sd_device_get_sysattr_value(parent, "devnum", &devnum_str);
+    CHECK("Failed to get devnum (%s)", strerrorname_np(-r));
+    int busnum = strtol(busnum_str, NULL, 10);
+    int devnum = strtol(devnum_str, NULL, 10);
+
+    device_info *di =
+        get_or_create_device_info_for_busdev(dlist, busnum, devnum);
+    if (iftype == MOUSE) {
+        di->mouse_id = hid_id;
+    } else if (iftype == KEYBOARD) {
+        di->keyboard_id = hid_id;
+    }
+
+    if (di->mouse_id != -1 && di->keyboard_id != -1 && !di->matched) {
+        di->matched = true;
+        printf("New device detected! busnum=%d devnum=%d\n", busnum, devnum);
+        struct op1w4k_bpf *skel = attach_bpf(di->mouse_id, di->keyboard_id);
+        if (skel) {
+            di->bpf_skel = skel;
+        }
+    }
+}
+
+static void handle_device_unbind(sd_device *dev, devices_list *dlist) {
+    int r = 0;
+
+    // Check subsystem
+    {
+        const char *subsystem = NULL;
+        r = sd_device_get_subsystem(dev, &subsystem);
+        CHECK("Failed to get subsystem (%s)", strerrorname_np(-r));
+        if (strcmp(subsystem, "usb") != 0)
+            return;
+    }
+
+    // Check devtype
+    {
+        const char *devtype = NULL;
+        r = sd_device_get_devtype(dev, &devtype);
+        CHECK("Failed to get devtype (%s)", strerrorname_np(-r));
+        if (strcmp(devtype, "usb_device") != 0)
+            return;
+    }
+
+    // Get busnum and devnum
+    const char *busnum_str = NULL, *devnum_str = NULL;
+    r = sd_device_get_property_value(dev, "BUSNUM", &busnum_str);
+    CHECK("Failed to get busnum (%s)", strerrorname_np(-r));
+    r = sd_device_get_property_value(dev, "DEVNUM", &devnum_str);
+    CHECK("Failed to get devnum (%s)", strerrorname_np(-r));
+    int busnum = strtol(busnum_str, NULL, 10);
+    int devnum = strtol(devnum_str, NULL, 10);
+
+    device_info *di = find_device_info_for_busdev(dlist, busnum, devnum);
+    if (di == NULL)
+        return;
+    device_info_free(di);
+    int i = di - dlist->devices.data;
+    vec_remove(&dlist->devices, i);
+    printf("Removing busnum=%d devnum=%d\n", busnum, devnum);
+}
+
+static int monitor_handler(
+    sd_device_monitor *m, sd_device *dev, void *userdata) {
+    devices_list *dlist = userdata;
+    sd_device_action_t action = -EINVAL;
+
+    sd_device_get_action(dev, &action);
+    if (action != SD_DEVICE_BIND && action != SD_DEVICE_UNBIND)
+        return 0;
+
+    if (action == SD_DEVICE_BIND) {
+        handle_device_bind(dev, dlist);
+    } else if (action == SD_DEVICE_UNBIND) {
+        handle_device_unbind(dev, dlist);
+        // dump_device(dev);
+    }
+
+    return 0;
+}
+
+void process_existing_devices(devices_list *dlist) {
+    sd_device_enumerator *enu = NULL;
+    sd_device_enumerator_new(&enu);
+    defer sd_device_enumerator_unref(enu);
+    sd_device_enumerator_add_match_subsystem(enu, "hid", true);
+
+    sd_device *dev = sd_device_enumerator_get_device_first(enu);
+    while (dev) {
+        defer dev = sd_device_enumerator_get_device_next(enu);
+        handle_device_bind(dev, dlist);
+    }
+}
+
+int main(int argc, char **argv) {
+    sd_event *event_loop = NULL;
+    sd_event_default(&event_loop);
+    defer sd_event_unref(event_loop);
+    sd_event_set_signal_exit(event_loop, true);
+
+    devices_list dlist = devices_list_new();
+    defer devices_list_free(dlist);
+
+    sd_device_monitor *mon = NULL;
+    sd_device_monitor_new(&mon);
+    defer sd_device_monitor_unref(mon);
+    sd_device_monitor_filter_add_match_subsystem_devtype(mon, "hid", NULL);
+    sd_device_monitor_filter_add_match_subsystem_devtype(
+        mon, "usb", "usb_device");
+    sd_device_monitor_attach_event(mon, event_loop);
+    sd_device_monitor_start(mon, monitor_handler, &dlist);
+
+    process_existing_devices(&dlist);
+    sd_event_loop(event_loop);
+
+    printf("\nbye\n");
+
+    return 0;
 }
