@@ -159,14 +159,14 @@ static int init_maps() {
         bpf_printk("Failed to init work-queue: %d", result);
         return 0;
     }
-    result = bpf_wq_set_callback_impl(&kbd_elem->wq, wq_callback_fn, 0, NULL);
+    result = bpf_wq_set_callback(&kbd_elem->wq, wq_callback_fn, 0);
 
     result = bpf_wq_init(&hold_elem->vol_wq, &hold_timer_map, 0);
     if (result != 0) {
         bpf_printk("Failed to init vol_wq: %d", result);
         return 0;
     }
-    result = bpf_wq_set_callback_impl(&hold_elem->vol_wq, vol_wq_callback_fn, 0, NULL);
+    result = bpf_wq_set_callback(&hold_elem->vol_wq, vol_wq_callback_fn, 0);
 
     return 0;
 }
