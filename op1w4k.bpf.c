@@ -17,6 +17,7 @@ char _license[] SEC("license") = "GPL v2";
 #define HID_KEYCODE_ENTER 40
 #define SEQUENCE_INTERVAL_NS 5000000  /* 5 ms between each key */
 #define HOLD_TIMEOUT_NS 500000000  /* 500 ms */
+#define DEBOUNCE_NS 15000000
 
 const volatile int kbd_hid_id = 0;
 enum {
@@ -31,7 +32,7 @@ const char key_sequence[] = {
     HID_KEYCODE_DOT,
     HID_KEYCODE_ENTER,
 };
-char key_sequence_index = 0;
+int key_sequence_index = 0;
 
 struct hold_timer_elem {
     struct bpf_timer hold_timer;
@@ -100,7 +101,6 @@ static int wq_callback_fn(void *map, int *key, void *_value) {
 
 enum { VOL_UP = 0xe9, VOL_DOWN = 0xea } vol_dir = VOL_UP;
 static int vol_wq_callback_fn(void *map, int *key, void *_value) {
-    struct hold_timer_elem *value = _value;
     int result;
 
     struct hid_bpf_ctx *hid_ctx = hid_bpf_allocate_context(kbd_hid_id);
@@ -230,7 +230,6 @@ int BPF_PROG(op1w4k_kbd_hid_device_event, struct hid_bpf_ctx *hid_ctx)
 SEC("struct_ops/hid_device_event")
 int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
 {
-    int result;
     __u8 *report = hid_bpf_get_data(hid_ctx, 0 /* offset */, 8 /* size */);
     if (!report)
         return 0;
@@ -239,6 +238,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
     if (report[0] != 1)
         return 0;
 
+    __u64 time_ns = bpf_ktime_get_ns();
     int zero = 0;
     struct hold_timer_elem* hold_elem = bpf_map_lookup_elem(&hold_timer_map, &zero);
     if (!hold_elem) {
@@ -269,13 +269,43 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx)
         }
     }
 
+    // Mouse button debounce
+    static __u8 last_buttons = 0;
+    static __u64 last_mouse1_time_ns = 0;
+    static __u64 last_mouse2_time_ns = 0;
+
+    bool last_mouse1 = last_buttons & 1;
+    bool last_mouse2 = last_buttons & 2;
+    bool mouse1 = report[1] & 1;
+    bool mouse2 = report[1] & 2;
+    if (!last_mouse1 && mouse1) {
+        if (last_mouse1_time_ns != 0) {
+            __u64 elapsed = time_ns - last_mouse1_time_ns;
+            if (elapsed < DEBOUNCE_NS) {
+                bpf_printk("Debounced mouse 1");
+                return -1;
+            }
+        }
+        last_mouse1_time_ns = time_ns;
+    }
+    if (!last_mouse2 && mouse2) {
+        if (last_mouse2_time_ns != 0) {
+            __u64 elapsed = time_ns - last_mouse2_time_ns;
+            if (elapsed < DEBOUNCE_NS) {
+                bpf_printk("Debounced mouse 2");
+                return -1;
+            }
+        }
+        last_mouse2_time_ns = time_ns;
+    }
+    last_buttons = report[1];
+
     return 0;
 }
 
 SEC("struct_ops/hid_rdesc_fixup")
 int BPF_PROG(op1w4k_kbd_hid_rdesc_fixup, struct hid_bpf_ctx *hctx)
 {
-    int result;
     __u8 *data = hid_bpf_get_data(hctx, 0 /* offset */, 4096 /* size */);
 
     if (!data)
