@@ -1,18 +1,22 @@
 #define _GNU_SOURCE
 #include "op1w4k.skel.h"
+#include "types.h"
 #include <bits/time.h>
+#include <bpf/libbpf.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddefer.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <systemd/sd-device.h>
 #include <systemd/sd-event.h>
 
 #include "rdesc.h"
 #include "vec.h"
 
-const char *vid_pids[][2] = {
+static const char *vid_pids[][2] = {
     {"3367", "1970"}, /* Wireless */
     {"3367", "1972"}, /* Wired */
 };
@@ -24,6 +28,8 @@ typedef enum {
 
 typedef struct {
     struct op1w4k_bpf *bpf_skel;
+    struct ring_buffer *debounce_rb;
+    sd_event_source *debounce_sdes;
     int busnum;
     int devnum;
     int mouse_id;
@@ -34,6 +40,8 @@ typedef struct {
 static device_info device_info_new(int busnum, int devnum) {
     return (device_info){
         .bpf_skel = NULL,
+        .debounce_rb = NULL,
+        .debounce_sdes = NULL,
         .busnum = busnum,
         .devnum = devnum,
         .mouse_id = -1,
@@ -43,6 +51,8 @@ static device_info device_info_new(int busnum, int devnum) {
 }
 
 static void device_info_free(device_info *d) {
+    sd_event_source_unref(d->debounce_sdes);
+    ring_buffer__free(d->debounce_rb);
     op1w4k_bpf__destroy(d->bpf_skel);
 }
 
@@ -73,6 +83,13 @@ static device_info *find_device_info_for_busdev(
     }
     return NULL;
 }
+
+// static int libbpf_print_fn(
+//     enum libbpf_print_level level, const char *format, va_list args) {
+//     if (level == LIBBPF_DEBUG)
+//         return 0;
+//     return vfprintf(stderr, format, args);
+// }
 
 static device_info *get_or_create_device_info_for_busdev(
     devices_list *list, int busnum, int devnum) {
@@ -122,13 +139,74 @@ static struct op1w4k_bpf *attach_bpf(int mouse_hid_id, int kbd_hid_id) {
     return r;
 }
 
+static int debounce_rb_callback(void *ctx, void *data, size_t size) {
+    if (size != sizeof(debounce_ev)) {
+        printf(
+            "Debounce event size mismatch! (expected %lu, got %lu)\n",
+            sizeof(debounce_ev),
+            size);
+        return 1;
+    }
+
+    debounce_ev ev;
+    memcpy(&ev, data, sizeof(ev));
+    printf(
+        "%lu.%lu: Debounced mouse %d (%lu.%lu us)\n",
+        ev.timestamp / 1000000,
+        ev.timestamp % 1000000,
+        ev.button,
+        ev.delta / 1000,
+        ev.delta % 1000);
+    return 0;
+}
+
+int debounce_sd_callback(
+    sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+    struct ring_buffer *rb = userdata;
+    ring_buffer__consume(rb);
+    return 0;
+}
+
 #define CHECK(s, a)                                                            \
     if (r < 0) {                                                               \
         fprintf(stderr, s "\n", (a));                                          \
         return;                                                                \
     }
 
-static void handle_device_bind(sd_device *dev, devices_list *dlist) {
+static void init_debounce_listener(
+    struct op1w4k_bpf *skel, sd_event *evloop, struct ring_buffer **rb_out,
+    sd_event_source **sdes_out) {
+    struct ring_buffer *rb = ring_buffer__new(
+        bpf_map__fd(skel->maps.debounce_ev_rb),
+        debounce_rb_callback,
+        NULL,
+        NULL);
+    if (rb == NULL) {
+        fprintf(
+            stderr,
+            "Failed to create ringbuffer (%s)\n",
+            strerrorname_np(errno));
+        return;
+    }
+    defer ring_buffer__free(rb);
+
+    sd_event_source *sdes = NULL;
+    int r = sd_event_add_io(
+        evloop,
+        &sdes,
+        bpf_map__fd(skel->maps.debounce_ev_rb),
+        EPOLLIN,
+        debounce_sd_callback,
+        rb);
+    CHECK("Failed to add ringbuffer to event loop (%s)", strerrorname_np(-r));
+
+    *rb_out = rb;
+    *sdes_out = sdes;
+    rb = NULL;
+}
+
+static void handle_device_bind(
+    sd_device *dev, devices_list *dlist, sd_event *evloop) {
     int r = 0;
 
     // Check subsystem
@@ -227,6 +305,8 @@ static void handle_device_bind(sd_device *dev, devices_list *dlist) {
         struct op1w4k_bpf *skel = attach_bpf(di->mouse_id, di->keyboard_id);
         if (skel) {
             di->bpf_skel = skel;
+            init_debounce_listener(
+                skel, evloop, &di->debounce_rb, &di->debounce_sdes);
         }
     }
 }
@@ -274,22 +354,22 @@ static int monitor_handler(
     sd_device_monitor *m, sd_device *dev, void *userdata) {
     devices_list *dlist = userdata;
     sd_device_action_t action = -EINVAL;
+    sd_event *evloop = sd_device_monitor_get_event(m);
 
     sd_device_get_action(dev, &action);
     if (action != SD_DEVICE_BIND && action != SD_DEVICE_UNBIND)
         return 0;
 
     if (action == SD_DEVICE_BIND) {
-        handle_device_bind(dev, dlist);
+        handle_device_bind(dev, dlist, evloop);
     } else if (action == SD_DEVICE_UNBIND) {
         handle_device_unbind(dev, dlist);
-        // dump_device(dev);
     }
 
     return 0;
 }
 
-void process_existing_devices(devices_list *dlist) {
+static void process_existing_devices(devices_list *dlist, sd_event *evloop) {
     sd_device_enumerator *enu = NULL;
     sd_device_enumerator_new(&enu);
     defer sd_device_enumerator_unref(enu);
@@ -298,7 +378,7 @@ void process_existing_devices(devices_list *dlist) {
     sd_device *dev = sd_device_enumerator_get_device_first(enu);
     while (dev) {
         defer dev = sd_device_enumerator_get_device_next(enu);
-        handle_device_bind(dev, dlist);
+        handle_device_bind(dev, dlist, evloop);
     }
 }
 
@@ -320,7 +400,7 @@ int main(int argc, char **argv) {
     sd_device_monitor_attach_event(mon, event_loop);
     sd_device_monitor_start(mon, monitor_handler, &dlist);
 
-    process_existing_devices(&dlist);
+    process_existing_devices(&dlist, event_loop);
     sd_event_loop(event_loop);
 
     printf("\nbye\n");
