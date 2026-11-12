@@ -239,6 +239,9 @@ struct {
     __uint(max_entries, 4096);
 } debounce_ev_rb SEC(".maps");
 
+int m1_cnt = 0;
+int m2_cnt = 0;
+
 SEC("struct_ops/hid_device_event")
 int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
     __u8 *report = hid_bpf_get_data(hid_ctx, 0 /* offset */, 8 /* size */);
@@ -289,6 +292,12 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
     bool last_mouse2 = last_buttons & 2;
     bool mouse1 = report[1] & 1;
     bool mouse2 = report[1] & 2;
+    if (mouse1) {
+        __atomic_fetch_add(&m1_cnt, 1, __ATOMIC_RELAXED);
+    }
+    if (mouse2) {
+        __atomic_fetch_add(&m2_cnt, 1, __ATOMIC_RELAXED);
+    }
     if (!last_mouse1 && mouse1) {
         if (last_mouse1_time_ns != 0) {
             __u64 delta = time_ns - last_mouse1_time_ns;
@@ -299,7 +308,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
                     .button = 1,
                 };
                 bpf_ringbuf_output(&debounce_ev_rb, &ev, sizeof(ev), 0);
-                return -1;
+                report[1] ^= 1;
             }
         }
         last_mouse1_time_ns = time_ns;
@@ -314,7 +323,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
                     .button = 2,
                 };
                 bpf_ringbuf_output(&debounce_ev_rb, &ev, sizeof(ev), 0);
-                return -1;
+                report[1] ^= 2;
             }
         }
         last_mouse2_time_ns = time_ns;

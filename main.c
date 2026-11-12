@@ -133,13 +133,14 @@ static struct op1w4k_bpf *attach_bpf(int mouse_hid_id, int kbd_hid_id) {
         return NULL;
     }
 
-    printf("Successfully started!\n");
+    printf("Successfully attached!\n");
     struct op1w4k_bpf *r = skel;
     skel = NULL;
     return r;
 }
 
 static int debounce_rb_callback(void *ctx, void *data, size_t size) {
+    struct op1w4k_bpf *skel = ctx;
     if (size != sizeof(debounce_ev)) {
         printf(
             "Debounce event size mismatch! (expected %lu, got %lu)\n",
@@ -151,12 +152,14 @@ static int debounce_rb_callback(void *ctx, void *data, size_t size) {
     debounce_ev ev;
     memcpy(&ev, data, sizeof(ev));
     printf(
-        "%lu.%lu: Debounced mouse %d (%lu.%lu us)\n",
+        "%lu.%06lu: Debounced mouse %d (%lu.%03lu us), M1 = %d, M2 = %d\n",
         ev.timestamp / 1000000,
         ev.timestamp % 1000000,
         ev.button,
         ev.delta / 1000,
-        ev.delta % 1000);
+        ev.delta % 1000,
+        __atomic_load_n(&skel->bss->m1_cnt, __ATOMIC_RELAXED),
+        __atomic_load_n(&skel->bss->m2_cnt, __ATOMIC_RELAXED));
     return 0;
 }
 
@@ -179,7 +182,7 @@ static void init_debounce_listener(
     struct ring_buffer *rb = ring_buffer__new(
         bpf_map__fd(skel->maps.debounce_ev_rb),
         debounce_rb_callback,
-        NULL,
+        skel,
         NULL);
     if (rb == NULL) {
         fprintf(
@@ -227,6 +230,8 @@ static void handle_device_bind(
     CHECK("Failed to get parent device (%s)", strerrorname_np(-r));
 
     // Check vendor ID and product ID
+    char *connections[] = {"wireless", "wired"};
+    char *connection = "";
     {
         const char *vid = NULL, *pid = NULL;
         size_t n = 0;
@@ -245,6 +250,7 @@ static void handle_device_bind(
             if (strncmp(vid_pids[i][0], vid, 4) == 0 &&
                 strncmp(vid_pids[i][1], pid, 4) == 0) {
                 found = true;
+                connection = connections[i];
                 break;
             }
         }
@@ -301,7 +307,11 @@ static void handle_device_bind(
 
     if (di->mouse_id != -1 && di->keyboard_id != -1 && !di->matched) {
         di->matched = true;
-        printf("New device detected! busnum=%d devnum=%d\n", busnum, devnum);
+        printf(
+            "New %s device detected! busnum=%d devnum=%d\n",
+            connection,
+            busnum,
+            devnum);
         struct op1w4k_bpf *skel = attach_bpf(di->mouse_id, di->keyboard_id);
         if (skel) {
             di->bpf_skel = skel;
@@ -344,10 +354,17 @@ static void handle_device_unbind(sd_device *dev, devices_list *dlist) {
     device_info *di = find_device_info_for_busdev(dlist, busnum, devnum);
     if (di == NULL)
         return;
+    int m1_cnt = __atomic_load_n(&di->bpf_skel->bss->m1_cnt, __ATOMIC_RELAXED);
+    int m2_cnt = __atomic_load_n(&di->bpf_skel->bss->m2_cnt, __ATOMIC_RELAXED);
     device_info_free(di);
     int i = di - dlist->devices.data;
     vec_remove(&dlist->devices, i);
-    printf("Removing busnum=%d devnum=%d\n", busnum, devnum);
+    printf(
+        "Removing busnum=%d devnum=%d; M1 = %d, M2 = %d\n",
+        busnum,
+        devnum,
+        m1_cnt,
+        m2_cnt);
 }
 
 static int monitor_handler(
