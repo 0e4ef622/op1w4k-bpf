@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+
 #include "op1w4k.skel.h"
 #include "types.h"
 #include <bits/time.h>
@@ -12,6 +13,7 @@
 #include <sys/epoll.h>
 #include <systemd/sd-device.h>
 #include <systemd/sd-event.h>
+#include <time.h>
 
 #include "rdesc.h"
 #include "vec.h"
@@ -151,8 +153,14 @@ static int debounce_rb_callback(void *ctx, void *data, size_t size) {
 
     debounce_ev ev;
     memcpy(&ev, data, sizeof(ev));
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    char ftime[32];
+    strftime(ftime, 32, "%Y-%m-%d %H:%M:%S%z", &local);
     printf(
-        "%lu.%06lu: Debounced mouse %d (%lu.%03lu us), M1 = %d, M2 = %d\n",
+        "%s: %lu.%06lu: Debounced mouse %d (%lu.%03lu us), M1 = %d, M2 = %d\n",
+        ftime,
         ev.timestamp / 1000000,
         ev.timestamp % 1000000,
         ev.button,
@@ -400,13 +408,29 @@ static void process_existing_devices(devices_list *dlist, sd_event *evloop) {
 }
 
 int main(int argc, char **argv) {
+    tzset();
     sd_event *event_loop = NULL;
     sd_event_default(&event_loop);
     defer sd_event_unref(event_loop);
     sd_event_set_signal_exit(event_loop, true);
 
     devices_list dlist = devices_list_new();
-    defer devices_list_free(dlist);
+    defer {
+        for (int i = 0; i < dlist.devices.length; ++i) {
+            device_info *di = &dlist.devices.data[i];
+            struct op1w4k_bpf *skel = di->bpf_skel;
+            int m1_cnt = __atomic_load_n(&skel->bss->m1_cnt, __ATOMIC_RELAXED);
+            int m2_cnt = __atomic_load_n(&skel->bss->m2_cnt, __ATOMIC_RELAXED);
+            printf(
+                "Removing busnum=%d devnum=%d; M1 = %d, M2 = %d\n",
+                di->busnum,
+                di->devnum,
+                m1_cnt,
+                m2_cnt);
+        }
+        devices_list_free(dlist);
+        printf("bye\n");
+    }
 
     sd_device_monitor *mon = NULL;
     sd_device_monitor_new(&mon);
@@ -419,8 +443,6 @@ int main(int argc, char **argv) {
 
     process_existing_devices(&dlist, event_loop);
     sd_event_loop(event_loop);
-
-    printf("\nbye\n");
 
     return 0;
 }

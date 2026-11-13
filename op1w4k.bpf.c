@@ -292,10 +292,11 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
     bool last_mouse2 = last_buttons & 2;
     bool mouse1 = report[1] & 1;
     bool mouse2 = report[1] & 2;
-    if (mouse1) {
+    char new_report1 = report[1];
+    if (mouse1 && !last_mouse1) {
         __atomic_fetch_add(&m1_cnt, 1, __ATOMIC_RELAXED);
     }
-    if (mouse2) {
+    if (mouse2 && !last_mouse2) {
         __atomic_fetch_add(&m2_cnt, 1, __ATOMIC_RELAXED);
     }
     if (!last_mouse1 && mouse1) {
@@ -308,7 +309,7 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
                     .button = 1,
                 };
                 bpf_ringbuf_output(&debounce_ev_rb, &ev, sizeof(ev), 0);
-                report[1] ^= 1;
+                new_report1 ^= 1;
             }
         }
         last_mouse1_time_ns = time_ns;
@@ -323,12 +324,13 @@ int BPF_PROG(op1w4k_mouse_hid_device_event, struct hid_bpf_ctx *hid_ctx) {
                     .button = 2,
                 };
                 bpf_ringbuf_output(&debounce_ev_rb, &ev, sizeof(ev), 0);
-                report[1] ^= 2;
+                new_report1 ^= 2;
             }
         }
         last_mouse2_time_ns = time_ns;
     }
     last_buttons = report[1];
+    report[1] = new_report1;
 
     return 0;
 }
